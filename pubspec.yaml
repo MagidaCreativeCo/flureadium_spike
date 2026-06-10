@@ -1,0 +1,35 @@
+name: flureadium_spike
+description: "A new Flutter project."
+
+publish_to: "none"
+
+version: 1.0.0+1
+
+environment:
+    sdk: ^3.12.1
+
+dependencies:
+    flutter:
+        sdk: flutter
+
+    cupertino_icons: ^1.0.8
+    flureadium:
+        git:
+            url: https://github.com/MagidaCreativeCo/flureadium.git
+            ref: magida/android-sdk-36
+            path: flureadium
+    path_provider: ^2.1.5
+    shared_preferences: ^2.5.5
+
+dev_dependencies:
+    flutter_test:
+        sdk: flutter
+
+    flutter_lints: ^6.0.0
+
+flutter:
+    uses-material-design: true
+
+    assets:
+        - assets/books/The_Adventures_of_Tom_Sawyer.epub
+        - assets/books/minimal.epub
