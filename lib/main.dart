@@ -75,6 +75,14 @@ class _SavedLocatorItem {
   final DateTime createdAt;
   final Locator locator;
 
+  ReaderDecoration toBookmarkDecoration() {
+    return ReaderDecoration(
+      id: id,
+      locator: locator,
+      style: ReaderDecorationStyle(style: DecorationStyle.underline, tint: const Color(0xFF3F51B5)),
+    );
+  }
+
   Map<String, dynamic> toJson() {
     return {
       'id': id,
@@ -352,6 +360,9 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
     super.dispose();
   }
 
+  static const String _highlightDecorationGroupId = 'leafra-spike-highlights';
+  static const String _bookmarkDecorationGroupId = 'leafra-spike-bookmarks';
+
   String _lastLocatorKeyFor(String bookId) => 'last_locator_$bookId';
   String _bookmarksKeyFor(String bookId) => 'bookmarks_$bookId';
   String _highlightsKeyFor(String bookId) => 'highlights_$bookId';
@@ -397,6 +408,13 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
 
       final preferences = await SharedPreferences.getInstance();
       await preferences.setString(_selectedBookKey, book.id);
+
+      try {
+        await _flureadium.closePublication();
+        _log('Closed previous publication before opening ${book.title}.');
+      } catch (error) {
+        _log('closePublication before open reported: $error');
+      }
 
       final bookPath = await _copyAssetBookToFile(book);
       _log('Copied ${book.title} to $bookPath');
@@ -494,11 +512,44 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
     await _saveReaderSettings(settings);
 
     final preferences = settings.toEPUBPreferences();
+    _log('Preference request: ${jsonEncode(settings.toJson())}');
     _flureadium.setDefaultPreferences(preferences);
+    _log('setDefaultPreferences() completed for requested preferences.');
     if (_publication != null) {
       await _flureadium.setEPUBPreferences(preferences);
+      _log('setEPUBPreferences() completed for live publication.');
+    } else {
+      _log('setEPUBPreferences() skipped because no publication is open.');
     }
-    _log('Applied reader preferences: ${jsonEncode(settings.toJson())}');
+  }
+
+  Future<void> _setDefaultVerticalScrollThenOpen() async {
+    final settings = _readerSettings.copyWith(verticalScroll: true);
+    setState(() => _readerSettings = settings);
+    await _saveReaderSettings(settings);
+    _flureadium.setDefaultPreferences(settings.toEPUBPreferences());
+    _log('Vertical scroll proof A: setDefaultPreferences(verticalScroll=true) before reopen.');
+    await _openBook(_selectedBook);
+  }
+
+  Future<void> _applyLiveVerticalScroll() async {
+    final settings = _readerSettings.copyWith(verticalScroll: true);
+    _log('Vertical scroll proof B: applying setEPUBPreferences(verticalScroll=true) live.');
+    await _applyReaderSettings(settings);
+  }
+
+  Future<void> _applyVerticalScrollThenReopen() async {
+    final settings = _readerSettings.copyWith(verticalScroll: true);
+    _log('Vertical scroll proof C: apply live preferences, then reopen publication.');
+    await _applyReaderSettings(settings);
+    await _openBook(_selectedBook);
+  }
+
+  Future<void> _restorePaginatedThenReopen() async {
+    final settings = _readerSettings.copyWith(verticalScroll: false);
+    _log('Preference proof reset: verticalScroll=false, then reopen publication.');
+    await _applyReaderSettings(settings);
+    await _openBook(_selectedBook);
   }
 
   void _subscribeToStreamsOnce() {
@@ -584,10 +635,54 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
   Future<void> _applySavedHighlights() async {
     final highlights = await _loadHighlights(_selectedBook.id);
     await _flureadium.applyDecorations(
-      'leafra-spike-highlights',
+      _highlightDecorationGroupId,
       highlights.map((h) => h.toDecoration()).toList(),
     );
-    _log('Applied ${highlights.length} saved highlight decoration(s).');
+    _log(
+      'applyDecorations($_highlightDecorationGroupId) completed with ${highlights.length} highlight decoration(s).',
+    );
+  }
+
+  Future<void> _applySavedBookmarkDecorations() async {
+    final bookmarks = await _loadBookmarks(_selectedBook.id);
+    await _flureadium.applyDecorations(
+      _bookmarkDecorationGroupId,
+      bookmarks.map((bookmark) => bookmark.toBookmarkDecoration()).toList(),
+    );
+    _log(
+      'applyDecorations($_bookmarkDecorationGroupId) completed with ${bookmarks.length} underline/bookmark decoration(s).',
+    );
+  }
+
+  Future<void> _applyAllSavedDecorations() async {
+    await _applySavedHighlights();
+    await _applySavedBookmarkDecorations();
+  }
+
+  Future<void> _clearAppliedDecorationsOnly() async {
+    await _flureadium.applyDecorations(_highlightDecorationGroupId, const <ReaderDecoration>[]);
+    _log('applyDecorations($_highlightDecorationGroupId) completed with 0 decoration(s).');
+    await _flureadium.applyDecorations(_bookmarkDecorationGroupId, const <ReaderDecoration>[]);
+    _log('applyDecorations($_bookmarkDecorationGroupId) completed with 0 decoration(s).');
+  }
+
+  Future<void> _logCurrentLocatorProbe() async {
+    final streamLocator = _lastLocator;
+    _log(
+      'Current locator from stream cache: ${streamLocator == null ? 'none' : _locatorSummary(streamLocator)}',
+    );
+    try {
+      final dynamic flureadium = _flureadium;
+      final dynamic locator = await flureadium.getCurrentLocator();
+      if (locator is Locator) {
+        await _saveLocatorForBook(_selectedBook.id, locator);
+        _log('getCurrentLocator() completed: ${_locatorSummary(locator)}');
+      } else {
+        _log('getCurrentLocator() completed but returned ${locator.runtimeType}: $locator');
+      }
+    } catch (error) {
+      _log('getCurrentLocator() unavailable or failed: $error');
+    }
   }
 
   Future<void> _showLibrary(BuildContext context) async {
@@ -860,7 +955,15 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
       createdAt: createdAt,
       locator: locator,
     );
-    await _saveBookmarks(_selectedBook.id, [...bookmarks, bookmark]);
+    final updatedBookmarks = [...bookmarks, bookmark];
+    await _saveBookmarks(_selectedBook.id, updatedBookmarks);
+    await _flureadium.applyDecorations(
+      _bookmarkDecorationGroupId,
+      updatedBookmarks.map((item) => item.toBookmarkDecoration()).toList(),
+    );
+    _log(
+      'Added underline/bookmark decoration at ${_locatorSummary(locator)}. Count=${updatedBookmarks.length}.',
+    );
     if (!context.mounted) return;
     ScaffoldMessenger.of(
       context,
@@ -889,10 +992,12 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
     final updated = [...highlights, highlight];
     await _saveHighlights(_selectedBook.id, updated);
     await _flureadium.applyDecorations(
-      'leafra-spike-highlights',
+      _highlightDecorationGroupId,
       updated.map((h) => h.toDecoration()).toList(),
     );
-    _log('Added highlight decoration at ${_locatorSummary(locator)}');
+    _log(
+      'Added highlight decoration at ${_locatorSummary(locator)}. Count=${updated.length}. applyDecorations completed.',
+    );
 
     if (!context.mounted) return;
     ScaffoldMessenger.of(
@@ -941,6 +1046,11 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
                       onPressed: () async {
                         final updated = bookmarks.where((item) => item.id != bookmark.id).toList();
                         await _saveBookmarks(book.id, updated);
+                        await _flureadium.applyDecorations(
+                          _bookmarkDecorationGroupId,
+                          updated.map((item) => item.toBookmarkDecoration()).toList(),
+                        );
+                        _log('Bookmark decoration delete applied. Count=${updated.length}.');
                         setSheetState(() => bookmarks = updated);
                       },
                     ),
@@ -1002,9 +1112,10 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
                             .toList();
                         await _saveHighlights(book.id, updated);
                         await _flureadium.applyDecorations(
-                          'leafra-spike-highlights',
+                          _highlightDecorationGroupId,
                           updated.map((item) => item.toDecoration()).toList(),
                         );
+                        _log('Highlight decoration delete applied. Count=${updated.length}.');
                         setSheetState(() => highlights = updated);
                       },
                     ),
@@ -1024,13 +1135,27 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
 
   Future<void> _showTtsPanel(BuildContext context) async {
     final voices = <dynamic>[];
+    final availableVoices = <dynamic>[];
+    bool? canSpeak;
     String? voicesError;
     try {
+      canSpeak = await _flureadium.ttsCanSpeak();
+      _log('ttsCanSpeak() completed: $canSpeak');
+    } catch (error) {
+      _log('ttsCanSpeak() failed: $error');
+    }
+    try {
       voices.addAll(await _flureadium.ttsGetSystemVoices());
-      _log('Loaded ${voices.length} system TTS voice(s).');
+      _log('ttsGetSystemVoices() completed with ${voices.length} voice(s).');
     } catch (error) {
       voicesError = error.toString();
-      _log('Failed to load system voices: $error');
+      _log('ttsGetSystemVoices() failed: $error');
+    }
+    try {
+      availableVoices.addAll(await _flureadium.ttsGetAvailableVoices());
+      _log('ttsGetAvailableVoices() completed with ${availableVoices.length} voice(s).');
+    } catch (error) {
+      _log('ttsGetAvailableVoices() failed or unavailable: $error');
     }
 
     if (!context.mounted) return;
@@ -1048,6 +1173,9 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
               Text(
                 'Use this to test Flureadium TTS, playback controls, voices, and timebased events.',
               ),
+              const SizedBox(height: 4),
+              Text('ttsCanSpeak: ${canSpeak == null ? 'unknown' : canSpeak.toString()}'),
+              Text('System voices: ${voices.length} · Available voices: ${availableVoices.length}'),
               const SizedBox(height: 16),
               Wrap(
                 spacing: 8,
@@ -1059,11 +1187,19 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
                     onPressed: () async {
                       try {
                         final canSpeak = await _flureadium.ttsCanSpeak();
-                        _log('ttsCanSpeak=$canSpeak');
-                        if (!canSpeak) await _flureadium.ttsRequestInstallVoice();
+                        _log('ttsCanSpeak() before enable: $canSpeak');
+                        if (!canSpeak) {
+                          _log('ttsRequestInstallVoice() requested because canSpeak=false.');
+                          await _flureadium.ttsRequestInstallVoice();
+                        }
+                        await _flureadium.ttsSetPreferences(TTSPreferences(speed: 1.0, pitch: 1.0));
+                        _log('ttsSetPreferences(speed=1.0,pitch=1.0) completed.');
                         await _flureadium.ttsEnable(
                           TTSPreferences(speed: 1.0, pitch: 1.0),
                           fromLocator: _lastLocator,
+                        );
+                        _log(
+                          'ttsEnable() completed with locator=${_lastLocator == null ? 'null' : _locatorSummary(_lastLocator!)}.',
                         );
                         await _flureadium.setDecorationStyle(
                           ReaderDecorationStyle(
@@ -1076,7 +1212,7 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
                           ),
                         );
                         setState(() => _ttsEnabled = true);
-                        _log('TTS enabled from current locator.');
+                        _log('setDecorationStyle() completed for TTS active/highlight styles.');
                       } catch (error) {
                         _log('TTS enable failed: $error');
                       }
@@ -1204,6 +1340,12 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
     );
   }
 
+  Future<List<int>> _decorationCounts() async {
+    final highlights = await _loadHighlights(_selectedBook.id);
+    final bookmarks = await _loadBookmarks(_selectedBook.id);
+    return [highlights.length, bookmarks.length];
+  }
+
   Future<void> _showCapabilityLab(BuildContext context) async {
     final publication = _publication;
     await showModalBottomSheet<void>(
@@ -1221,6 +1363,17 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
               Text('Mode: ${_readerSettings.verticalScroll ? 'Vertical scroll' : 'Paginated'}'),
               Text(
                 'Locator: ${_lastLocator == null ? 'None yet' : _locatorSummary(_lastLocator!)}',
+              ),
+              FutureBuilder<List<int>>(
+                future: _decorationCounts(),
+                builder: (context, snapshot) {
+                  final counts = snapshot.data ?? const [0, 0];
+                  return Text(
+                    'Requested prefs: ${jsonEncode(_readerSettings.toJson())}\n'
+                    'Last href: ${_lastLocator?.href ?? 'none'}\n'
+                    'Highlights: ${counts[0]} · Bookmark/underline decorations: ${counts[1]}',
+                  );
+                },
               ),
               const SizedBox(height: 16),
               _buildLabSection(
@@ -1251,22 +1404,68 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
               ),
               _buildLabSection(
                 context,
-                title: 'Reader data',
+                title: 'Preference proof',
                 children: [
                   _labButton(
-                    'Apply highlights',
-                    Icons.format_color_fill_outlined,
-                    publication == null ? null : _applySavedHighlights,
+                    'Default vertical + reopen',
+                    Icons.open_in_new_outlined,
+                    publication == null ? null : _setDefaultVerticalScrollThenOpen,
                   ),
                   _labButton(
-                    'Add highlight here',
+                    'Live vertical apply',
+                    Icons.swap_vert_outlined,
+                    publication == null ? null : _applyLiveVerticalScroll,
+                  ),
+                  _labButton(
+                    'Apply vertical + reopen',
+                    Icons.refresh_outlined,
+                    publication == null ? null : _applyVerticalScrollThenReopen,
+                  ),
+                  _labButton(
+                    'Reset paginated + reopen',
+                    Icons.view_carousel_outlined,
+                    publication == null ? null : _restorePaginatedThenReopen,
+                  ),
+                ],
+              ),
+              _buildLabSection(
+                context,
+                title: 'Reader data and decoration proof',
+                children: [
+                  _labButton(
+                    'Get current locator',
+                    Icons.my_location_outlined,
+                    publication == null ? null : _logCurrentLocatorProbe,
+                  ),
+                  _labButton(
+                    'Apply saved decorations',
+                    Icons.format_color_fill_outlined,
+                    publication == null ? null : _applyAllSavedDecorations,
+                  ),
+                  _labButton(
+                    'Decorate locator highlight',
                     Icons.border_color_outlined,
                     publication == null ? null : () => _addCurrentHighlight(context),
+                  ),
+                  _labButton(
+                    'Decorate locator bookmark',
+                    Icons.bookmark_add_outlined,
+                    publication == null ? null : () => _addCurrentBookmark(context),
+                  ),
+                  _labButton(
+                    'Clear applied decorations',
+                    Icons.layers_clear_outlined,
+                    publication == null ? null : _clearAppliedDecorationsOnly,
                   ),
                   _labButton(
                     'Show highlights',
                     Icons.palette_outlined,
                     publication == null ? null : () => _showHighlights(context),
+                  ),
+                  _labButton(
+                    'Show bookmarks',
+                    Icons.bookmarks_outlined,
+                    publication == null ? null : () => _showBookmarks(context),
                   ),
                   _labButton(
                     'Diagnostics',
@@ -1447,13 +1646,14 @@ class _RenderLauncherScreenState extends State<RenderLauncherScreen> {
             initialLocator: _initialLocator,
             onReady: () async {
               _subscribeToStreamsOnce();
-              await _applySavedHighlights();
+              await _applyAllSavedDecorations();
             },
             onTap: () => _log('Reader content tap'),
             onGoLeft: () => _log('Reader reported goLeft'),
             onGoRight: () => _log('Reader reported goRight'),
             onSwipe: () => _log('Reader reported swipe'),
             onLocatorChanged: (locator) async {
+              _log('Widget onLocatorChanged: ${_locatorSummary(locator)}');
               await _saveLocatorForBook(_selectedBook.id, locator);
             },
             onExternalLinkActivated: (url) {
